@@ -1,0 +1,1134 @@
+---
+title: "Predicting Tanzanian Well Functionality - MATH 1298 Project - Part 1 "
+author: "Brian Tregillis s3526783"
+date: "1 September 2018"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE, echo=FALSE, results='hide', message=FALSE, warning=FALSE,  comments =NA}
+knitr::opts_chunk$set(echo = FALSE)
+library(tidyverse)
+library(ggplot2)
+library(lubridate)
+library(ggmap)
+library(FNN)
+library(stringdist)
+library(OneR)
+library(knitr)
+
+Sys.setenv(PATH = paste(Sys.getenv("PATH"), "C:\\Program Files\\MiKTeX 2.9\\miktex\\bin\\x64", sep=.Platform$path.sep))
+
+chart_count = 0
+
+chart_statusfill_obs = function(data, x, colname) {
+    chart_count <<- chart_count + 1
+    title_name = paste0('Diagram ',chart_count,' - Observed ',colname,' By Well Status')
+    y_name = paste0('Observations')
+    
+    ggplot(data) + 
+    geom_bar(aes_string(x = x,fill = "status_group")) + 
+    scale_fill_manual(values = c("firebrick","orangered","forestgreen")) +
+    theme_bw() +
+    labs(x = colname, fill = 'Well Status',
+         title = title_name, y = y_name)+
+    theme(panel.border = element_rect(fill = NA, colour = NA), 
+          axis.line = element_line(colour = 'grey13'), 
+          panel.grid.major = element_line(colour = NA), 
+          panel.grid.minor = element_line(colour = NA))
+}
+
+chart_obs = function(data, x,colname) {
+    chart_count <<- chart_count + 1
+    title_name = paste0('Diagram ',chart_count,' - Observations by ',colname)
+    y_name = paste0('Observations')
+    ggplot(data) + 
+        geom_bar(aes_string(x = x))+
+    theme_bw() +
+    labs(x = colname, title = title_name, y = y_name)+
+    theme(panel.border = element_rect(fill = NA, colour = NA), 
+          axis.line = element_line(colour = 'grey13'), 
+          panel.grid.major = element_line(colour = NA), 
+          panel.grid.minor = element_line(colour = NA))
+}
+
+chart_obs_agg = function(data, x,colname) {
+    chart_count <<- chart_count + 1
+    title_name = paste0('Diagram ',chart_count,' - Number Of ',colname,'s By Observations Recorded')
+    y_name = paste0(colname,'s')
+    x_name = paste0('Observations Recorded')
+    
+    ggplot(data) + 
+        geom_bar(aes_string(x = x))+
+        theme_bw() +
+        labs(x = x_name, title = title_name, y = y_name)+
+        theme(panel.border = element_rect(fill = NA, colour = NA), 
+              axis.line = element_line(colour = 'grey13'), 
+              panel.grid.major = element_line(colour = NA), 
+              panel.grid.minor = element_line(colour = NA))
+}
+
+chart_density = function(data, x, colname) {
+    chart_count <<- chart_count + 1
+    title_name = paste0('Diagram ',chart_count,' - Observations by ',colname)
+    y_name = paste0('Observation Density')
+    
+    ggplot(data) + 
+        geom_density(aes_string(x = x), fill = 'grey13') +
+         theme_bw() +
+         labs(x = colname, title = title_name, y = y_name)+
+         theme(panel.border = element_rect(fill = NA, colour = NA), 
+               axis.line = element_line(colour = 'grey13'), 
+               panel.grid.major.x = element_line(colour = NA), 
+               panel.grid.minor = element_line(colour = NA))
+}
+
+chart_status_obs_facetrow = function(data, x, facet, facetScale = "fixed", colname) {
+    chart_statusfill_obs(data, x, colname) + 
+    facet_grid(facet, scales = facetScale)
+}
+
+
+
+table_char_freq = function(data, col, names) {
+    upnames = c(names, "Observations")
+        data %>%
+        select_(col) %>%
+        table() %>%
+        as.data.frame() %>%
+        arrange(desc(Freq)) %>%
+        setNames(upnames) 
+}
+
+
+drop_col = function(data, col) {
+    data %>%
+    select_(.dots = paste('-',col))
+}
+
+factor_summary_table = function(table) {
+    c(nrow(table),
+      round(mean(table[["Observations"]]),0),
+      min(table[["Observations"]]),
+      max(table[["Observations"]])) %>%
+        t() %>%
+        as.data.frame() %>%
+        setNames(c("Factors",
+                   "Mean Observations",
+                   "Min Observations",
+                   "Max Observations"))
+    }
+
+data_buckets = function(data, col, bucket){
+    ceiling(data[[col]]/bucket)*bucket
+}
+
+
+
+mean_latlon = function(data, geo) {
+    means = data %>%
+    group_by_(geo) %>%
+    summarise(longitude_new = mean(longitude))
+
+    means = data %>%
+    group_by_(geo) %>%
+    summarise(latitude_new = mean(latitude)) %>%
+    merge(means,
+          by = geo)
+    
+    means
+}
+
+new_latlon = function() {
+    prediction_set_nolon$latitude_best <<- coalesce(prediction_set_nolon$latitude_best,
+                                                  prediction_set_nolon$latitude_new)
+    prediction_set_nolon$longitude_best <<- coalesce(prediction_set_nolon$longitude_best,
+                                                   prediction_set_nolon$longitude_new)
+    }
+
+find_new_latlon = function(data, mean_data, col){
+    data %>%
+        merge(mean_latlon(mean_data,col),
+              by = col,
+              all.x = TRUE)
+}
+
+char_clean = function(data, col) {
+    x = tolower(data[[col]]) %>%
+        gsub("[^[:alpha:] ]","",.) %>%
+        gsub('\\b\\w{1}\\b','',.) %>%
+        gsub("  "," ",.) %>%
+        trimws(.)
+    x
+}
+
+chart_percent = function(data, col, colname) {
+    chart_count <<- chart_count + 1
+    title_name = paste0('Diagram ',chart_count,' - Observed ',colname,' By Well Status (%)')
+    y_name = paste0( 'Percentage Of ',colname,' Group')
+    
+    form = paste0('id ~ ',col,' + status_group') %>%
+        as.formula()
+    
+    chart_data = aggregate(
+        form, 
+        data, 
+        length) %>%
+    rename(observations = id) %>%
+    ggplot()
+    
+    chart_data + geom_bar(
+        aes_string(x = col,fill = "status_group", y  = "observations"),
+    position = "fill",
+    stat = "identity") +
+    scale_fill_manual(values = c("firebrick","orangered","forestgreen")) +
+    theme_bw() +
+    labs(x = colname, fill = 'Well Status',
+         title = title_name, y = y_name)+
+    theme(panel.border = element_rect(fill = NA, colour = NA), 
+          axis.line = element_line(colour = 'grey13'), 
+          panel.grid.major = element_line(colour = NA), 
+          panel.grid.minor = element_line(colour = NA))
+}
+```
+
+## Introduction
+
+In Tanzania access to water is an important issue. For example, only 100,000 of the city Dar Es Salaam's 3.5 million citizens have access to running water (Japan International Cooperation Agency 2008). DrivenData, a website that hosts socially oriented data competitions is providing access to data on the observed functionality of wells in Tanzania. The aim of this project is to use this data to predict the functionality of wells, and if possible to better understand the variables that contribute to well functionality.
+Specifically, using the data provided, the project will try and assign a status to an test data set to predict if the well is Functional, Functional but in need of repair, or Non-functional. A useful model would enable groups to understand which wells are most likely to be non-functional and provided services to improve their functionality. Additionally, the variables that are important (including some that may not be included in the final model ), may be able to identify why these wells are becoming non-functinoal. For instance, there may be issues with local administration or things like geography may create barriers to access.
+
+The provided data set has 59,400 observations with 41 variables including the response variable "status_group".
+
+```{r ReadAndMerge}
+#Read in the data
+predictors = 
+    read.csv("data/4910797b-ee55-40a7-8668-10efd5c1b960.csv") 
+response = 
+    read.csv("data/0bf8bc6e-30d0-4c50-956a-603fc693d966.csv")
+
+#Join the predictors to response
+prediction_set = 
+    merge(response,
+      predictors,
+      by = "id") %>% 
+    as.tibble()
+
+prediction_set_working = prediction_set
+rm(predictors, response)
+
+```
+
+
+#The Response Variable: Pump Status *status_group*
+
+The variable of interest in this problem is the variable named "status_group". This indicates the observed status of the pump and has three possible values: Functional; Functional needs repair; Not Functional.
+
+As can be seen in table 1, the majority of the 59,400 observations resulted in an outcome of Functional (32K) or Non Functional (23K). There are only 4,317 observations where the pump was found to be Functional but needing repair.
+
+```{r ResponseTable} 
+
+table(prediction_set$status_group) %>%
+    cbind("Observations:" = .)%>%
+    kable(caption = 'Response Variable Observations By Category')
+
+```
+
+\pagebreak
+
+#Predictors
+
+There are 40 other variables in the data, table 2 details the variables.
+
+```{r Variables} 
+kable(rbind(c("id","numeric","Observation identifier."),
+c("status_group","character","The status of the well, the response variable for this set."),
+c("amount_tsh","numeric","Total Static Head, the height that the water is raised to get to the pump."),
+c("date_recorded","date","The date that the observation was made."),
+c("funder","character","The name of the organisation that funded the well."),
+c("gps_height","numeric","Altitude of the well"),
+c("installer","character","Organsisation who installed the well."),
+c("longitude","numeric","The longitude of the well's location"),
+c("latitude","numeric","The latitude of the well's location"),
+c("wpt_name","character","The name of the well"),
+c("num_private","binary","Unknown, no description given"),
+c("basin","character","Name of the water basin"),
+c("subvilage","character","Sub Village, Geographic"),
+c("region","character","Region, Geographic"),
+c("region_code","numeric","Region Code, Geographic"),
+c("district_code","numeric","District Code, Geographic"),
+c("lga","character","Local Government Authority, Geographic"),
+c("ward","character","Ward, Geographic"),
+c("population","numeric","Population living around the well"),
+c("public_meeting","binary","Unknown, assumption that it is about if the well is in a public meeting area."),
+c("recorded_by","character","Organiastion who recorded the observation"),
+c("scheme_management","character","Organiastion who manages the scheme that the well is operated through"),
+c("scheme_name","character","The name of the scheme that the well is operated through"),
+c("permit","binary","There a permit for the well"),
+c("construction_year","numeric","Year that the well was built"),
+c("extraction_type","character","How water is extracted from the well, most categories"),
+c("extraction_type_group","character","How water is extracted from the well, middle categories"),
+c("extraction_type_class","character","How water is extracted from the well, least categories"),
+c("management_group","character","The type of organisation who manages the well"),
+c("payment","character","What type of payment is required to use the well"),
+c("payment_type","character","What type of payment is required to use the well"),
+c("water_quality","character","Quality of water that is pumped from the well, detailed"),
+c("quality_group","character","Quality of water that is pumped from the well, broad"),
+c("quantity","character","Categorisation of how much was is available from the well"),
+c("quantity_group","character","Categorisation of how much was is available from the well"),
+c("source","character","What type of water source the wells water comes from, detailed"),
+c("source_type","character","What type of water source the wells water comes from, middle"),
+c("source_class","character","What type of water source the wells water comes from, broad"),
+c("waterpoint_type","character","How is the water accessed from the well, detailed"),
+c("waterpoint_type_group","character","How is the water accessed from the well, broad")),
+caption = "Data Variables In The Tanzanian Well Data")
+```
+
+##Date of observation *date_recorded*
+
+A summary of the observation dates, shows that observations have been made from 1960 to 2013. The date field is imported as a character field, so a transformation is conducted to convert it to a POSIX date format. From this, the Year, Month and day of the week of each of the observations is extracted.
+
+The plot of the observations by the year and month they were taken shows that there were very few observations prior to 2011. The majority of observations fall in 2011 and 2013, with a smaller number in 2012. The observations are not evenly distributed amongst the months and years. For instance, only 2012 has a sizable number of observations in October and there are very few observations in May, June, September or December in any year. 
+
+```{r DateChart1}
+
+#----------------Date_recorded
+
+month = c('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec')
+weekday = c('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday',  'Saturday', 'Sunday')
+
+prediction_set_working$date_recorded_POSIX = as.POSIXct(prediction_set_working$date_recorded)
+prediction_set_working$year_recorded = year(prediction_set_working$date_recorded_POSIX)
+prediction_set_working$month_recorded = month(prediction_set_working$date_recorded_POSIX)  %>%
+    month.abb[.] %>%
+    factor(levels = month)
+prediction_set_working$weekday_recorded = weekdays(prediction_set_working$date_recorded_POSIX) %>%
+    factor(levels = weekday)
+rm(month, weekday)
+#chart_status_obs_facetrow(prediction_set_working, "month_recorded", 'year_recorded ~ .', "Year and Month")
+```
+
+Given this inconsistent observation periods, it would be difficult to draw any conclusions about changes in the incidence of functional wells over time as it may just be a seasonal difference that is observed. Also, it is difficult to draw seasonal inference as observation practices or the quality of wells may change over time. For this reason this data was not included in the prediction set.
+
+However, looking at the plot of the observations by weekday, there is a good distribution of observations across all of the days. There is very little difference in the spread of the Pump Status variable across the days, this may mean it will have little benefit in prediction but there is a possibility that it's interaction with other variables will make it useful.
+
+```{r DateChart2}
+chart_statusfill_obs(prediction_set_working, "weekday_recorded", "Weekday")
+
+```
+
+##Administrative Boundaries
+
+Within the data set there are six variables related to geographical administrative boundaries. These are, from largest area to smallest: Region and Region Code; District and Local Government Authorities (LGA); Ward and Sub-village.
+
+###Region *region* and Region Code *region_code*
+
+There are 21 regions. The region code variable was be dropped as it duplicates the region name, and the region name is more intuitive. The region with the most observations is Iringa with 5,294 and the least observations were made in Dar es Salaam, 805.
+
+
+```{r Region}
+prediction_set_working = drop_col(prediction_set_working,'region_code')
+
+table_char_freq(prediction_set_working, 
+                'region',
+                "Region") %>%
+    kable(caption = 'Observations By Region')
+
+```
+
+###District *district_code* And LGA *lga*
+
+The districts are the second largest, and the data is provided as district codes. There are 21 district codes in the data, however, they need to be combined with the regions because the district code is reused across each region. For example, all of the regions have a district 1. Therefore, these two variables were combined to create a variable called "region_district", where district 1 in the Arusha region would display as "Arusha_D1". Making this combination results in 132 districts in the data.
+
+The data is left skewed, as can be seen in Diagram 2, with more than 65% of region-districts having less than 500 observations.
+
+```{r DistrictRegion}
+prediction_set_working$district_region = as.factor(paste0(prediction_set_working$region,"_D",prediction_set_working$district_code))
+
+district_region_count = table_char_freq(prediction_set_working, 
+                                        'district_region',
+                                        "District Region")
+
+factor_summary_table(district_region_count) %>%
+    kable(caption = "District-Region - Observations By Unique District-Region - Summary")
+```
+
+There are also 125 LGAs in the data ranging from one observation to 2503 observations. The Tanzanian 2012 Population and Housing Census International (Household Survey Network 2014) implies that the districts and LGAs are the same thing, as the districts are referred to be the LGA in this data set.  Mostly LGAs and Districts are aligned in the data, however, there is not a complete match with some districts having observations from multiple LGAs and vice-versa. 
+
+```{r LGA}
+lga_count = table_char_freq(prediction_set_working, 
+                            'lga',
+                            'LGA')
+factor_summary_table(lga_count) %>%
+     kable(caption = 'LGA - Observations By Unique LGA - Summary')
+```
+
+Looking at the distribution of observations by LGA (diagram 2), this is likely better distributed than the district data for predictive purposes as there are not as many low observation areas. Therefore considering the similarity between the two and the better distribution of LGA, LGA was retained while district-region and district_code were dropped from this analysis.
+
+```{r LGA2}
+district_region_count$var = 'District Region'
+lga_count$var = 'LGA'
+
+districtr_lga_counts = rbind(lga_count[,c('Observations','var')],
+                             district_region_count[,c('Observations','var')])
+
+districtr_lga_counts$observations_ceiling100 = 
+    data_buckets(districtr_lga_counts, "Observations", 100) 
+chart_count = chart_count + 1
+
+title_name = paste0('Diagram ',chart_count,' - Number Of LGAs and Districts By Observations Recorded')
+y_name = paste0('LGAs and Districts')
+x_name = paste0('Observations Recorded')
+
+
+ggplot(districtr_lga_counts) +
+    geom_bar(aes(x=observations_ceiling100, fill = var), position = 'dodge') + 
+    labs(x = x_name, title = title_name, y = y_name)+
+    theme(panel.border = element_rect(fill = NA, colour = NA), 
+          axis.line = element_line(colour = 'grey13'), 
+          panel.grid.major = element_line(colour = NA), 
+          panel.grid.minor = element_line(colour = NA))
+
+rm(lga_count,
+   district_region_count,
+   districtr_lga_counts)
+
+prediction_set_working = drop_col(prediction_set_working,'district_region')
+prediction_set_working = drop_col(prediction_set_working,'district_code')
+```
+
+###Ward *ward*
+
+There are 2092 wards in the data ranging from one observation to 307. The naming is clean, but there are 88 ward names that are found within multiple LGAs. This is not a data entry issue as, for instance, "Majengo" is a ward in four LGAs (Wikipedia 2013) To clean this, a new variable ward_lga is created which combines the ward and lga data. If the ward in an observation is "Majengo" and the LGA is "Dodoma", the new variable will be named "Majengo_Dodoma". The variable "ward" is then redundant and was removed.
+
+For this new "ward_lga" variable, there are 2191 combinations with the same range of observations as the ward data. In diagram 3 it can be seen that the data has a long right tail with small number of wards (14)  having between 150 and 307. 
+
+```{r wardLGA}
+prediction_set_working$ward_lga = paste0(prediction_set_working$ward,"_",prediction_set_working$lga)
+
+prediction_set_working = drop_col(prediction_set_working, "ward")
+
+ward_lga_count = table_char_freq(prediction_set_working, 
+                             'ward_lga',
+                             c("Ward Lga"))
+
+ward_lga_count$observations_ceiling10 = 
+    data_buckets(ward_lga_count, "Observations", 10) 
+
+chart_obs_agg(ward_lga_count, "observations_ceiling10", "Ward-LGA")
+
+rm(ward_lga_count)
+```
+
+To try and create a variable with more equal distribution, a new variable was created where the default value is the name of the Region followed by LGA followed by the Ward name e.g. for the Majengo ward in the Dodoma LGA in the Dodoma Region the value is "Dodoma_Dodoma_Majengo". However, in the case that there are less than 150 observations in one ward, then the Ward value becomes "_OTHER" name e.g. "Dodoma_Dodoma_OTHER". And, if the LGA has less than 150 observations the LGA becomes OTHER and is rolled up to the region level i.e. if the Dodoma ward had less than 150 observations it would become "Dodoma_OTHER_OTHER" This new variable is called "admin_district". 
+"admin_district" contains 139 unique combinations with a range from 21 observations to 1376 combinations.
+
+```{r adminDistrict, include=FALSE, echo=FALSE, results='hide', message=FALSE, warning=FALSE,  comments =NA}
+
+big_wards = table(prediction_set_working$ward_lga) %>%
+    as.data.frame() %>%
+    filter(Freq >= 150) %>%
+    .$Var1 
+big_ward_rows = prediction_set_working$ward_lga %in% big_wards
+
+
+little_lgas = table(prediction_set_working$lga) %>%
+    as.data.frame() %>%
+    filter(Freq < 150) %>%
+    .$Var1 
+little_lga_rows = prediction_set_working$lga %in% little_lgas
+
+
+prediction_set_working$admin_district = paste0(prediction_set_working$region,"_",prediction_set_working$lga,"_OTHER")
+prediction_set_working$admin_district[big_ward_rows] = paste0(prediction_set_working$region[big_ward_rows],"_",prediction_set_working$lga[big_ward_rows],"_",prediction_set_working$ward[big_ward_rows])
+prediction_set_working$admin_district[little_lga_rows] = paste0(prediction_set_working$region[little_lga_rows],"_OTHER_OTHER")
+
+admin_district_count = table_char_freq(prediction_set_working, 
+                                       'admin_district',
+                                       c("Admin District"))
+
+admin_district_count$observations_ceiling10 = 
+    data_buckets(admin_district_count, "Observations", 100) 
+
+chart_obs_agg(admin_district_count, "observations_ceiling10", "Admin District")
+
+rm(admin_district_count, big_ward_rows, big_wards, little_lga_rows, little_lgas)
+
+```
+
+###Subvillage *subvillage*
+
+The final administrative area is "sub-village", there are 19,288 options. However, there are data quality issues with numerical names, other non-alpha characters and single letter names. There are also duplicated sub-village names among wards. The majority of sub-villages will have one or only couple of observations and will not be useful for prediction, however, they will be useful in imputing other missing features due to their relatively small geographic coverage i.e. missing GPS coordinates and altitudes, so the a rough data clean was conducted.
+
+```{r Subvillage}
+
+prediction_set_working$subvillage = tolower(prediction_set_working$subvillage)
+prediction_set_working$subvillage = gsub("[^[:alpha:] ]","",prediction_set_working$subvillage)
+prediction_set_working$subvillage = gsub('\\b\\w{1}\\b','',prediction_set_working$subvillage)
+prediction_set_working$subvillage = gsub("  "," ",prediction_set_working$subvillage)
+prediction_set_working$subvillage = trimws(prediction_set_working$subvillage)
+
+prediction_set_working$subvillage[prediction_set_working$subvillage == ''] = NA
+
+prediction_set_working$subvillage_ward = paste0(prediction_set_working$subvillage, "_", prediction_set_working$ward_lga)
+
+prediction_set_working$subvillage_ward[is.na(prediction_set_working$subvillage)] = NA
+
+subvillage_ward_count = table_char_freq(prediction_set_working, 
+                                       'subvillage_ward',
+                                       c("Admin District"))
+
+factor_summary_table(subvillage_ward_count)%>%
+    kable(caption = 'Subvillage-Ward - Observations By Unique Subvillage-Ward - Summary')
+
+subvillage_ward_count$observations_ceiling1 = 
+    data_buckets(subvillage_ward_count, "Observations", 1) 
+
+prediction_set_working = drop_col(prediction_set_working, "subvillage")
+
+rm(subvillage_ward_count)
+
+```
+
+The first step was to clean out the dirty data. The data was converted to lowercase, non-alpha characters were removed, words within each string that were only one character were removed, double spaces were reduced to single spacing and any trailing or preceding spaces were removed.
+
+Next, a new variable "sub-village_ward" was created. This is the name of the sub-village, an underscore and the name of the ward. Values that are "NA" in the previous step remain "NA", another option would have been to aggregate them under a "UNKNOWN_" ward name. They have been left as "NA" because the usefulness of this data is for imputing averages values for Longitude and Latitude. In that case it will be better to take the total average from the ward, instead of the average of the unknown villages i.e. including all sub-village locations not just the unknown ones because new "NA" observations in the same ward will not necessarily be similar to the current "NA" observations. 
+"sub-village_ward" has 27,247 unique values. 14,692 of these have one observation, and only 260 have more than 10 observations. The "sub-village" variable was removed from the data set.
+
+##GPS Data
+
+###Latitude *latitutde* and Longitude *longitude*
+
+The data set includes both the latitude and longitude of the well location which could be very useful where the geographical location may influence the functionality of the well, possible factors could be remoteness affecting the availability of trade assistance, the harshness of weather on the pump or even the terrain. 
+Looking at the longitude in a density plot (diagram 5), there is a small amount of data clustered around a longitude of 0 while the majority of the data falls between 30 and 40 degrees. Around 28 degrees longitude marks the most easterly part of Tanzania, therefore, we can conclude this is missing data.
+
+```{r latlon1}
+
+chart_density(prediction_set_working, "longitude", "Longitude")
+
+```
+
+There are 1812 records with missing longitude data and the same records have missing latitudes. Out of 125 LGAs all of the missing data is from 3 distinct LGAs that are within the Mwanza and Shinyanga regions.
+As mentioned in the Geography section of this report, the administrative areas were used to impute GPS data for the missing records. This was done by starting with the lowest level, "sub-village_ward" and computing an average lat/lon where there is a match i.e. not an NA. Where there is no match found this process is repeated at "ward_lga", then "lga", and then "region".
+Of the missing data, 16 records were matched at "sub-village_ward", 175 at "ward_lga", 1133 at "lga" and the remaining 488 at "region" level.
+
+```{r latlon2, echo=FALSE, message=FALSE, warning=FALSE,  comments =NA}
+prediction_set_nolon = prediction_set_working[prediction_set_working$longitude == 0,]
+prediction_set_lon = prediction_set_working[!prediction_set_working$longitude == 0,]
+
+prediction_set_nolon$latitude_best = NA %>%
+    as.numeric()
+prediction_set_nolon$longitude_best = NA %>%
+    as.numeric()
+
+prediction_set_nolon = find_new_latlon(prediction_set_nolon, prediction_set_lon, "subvillage_ward")
+
+new_latlon()
+prediction_set_nolon = drop_col(prediction_set_nolon, "longitude_new")
+prediction_set_nolon = drop_col(prediction_set_nolon, "latitude_new")
+
+prediction_set_nolon = find_new_latlon(prediction_set_nolon, prediction_set_lon, "ward_lga")
+new_latlon()
+prediction_set_nolon = drop_col(prediction_set_nolon, "longitude_new")
+prediction_set_nolon = drop_col(prediction_set_nolon, "latitude_new")
+
+prediction_set_nolon = find_new_latlon(prediction_set_nolon, prediction_set_lon, "lga")
+new_latlon()
+prediction_set_nolon = drop_col(prediction_set_nolon, "longitude_new")
+prediction_set_nolon = drop_col(prediction_set_nolon, "latitude_new")
+
+
+prediction_set_nolon = find_new_latlon(prediction_set_nolon, prediction_set_lon, "region")
+new_latlon()
+prediction_set_nolon = drop_col(prediction_set_nolon, "longitude_new")
+prediction_set_nolon = drop_col(prediction_set_nolon, "latitude_new")
+
+prediction_set_nolon$latitude = prediction_set_nolon$latitude_best
+prediction_set_nolon$longitude = prediction_set_nolon$longitude_best
+
+prediction_set_working = prediction_set_nolon %>%
+    select(-contains("best")) %>%
+    rbind(prediction_set_lon)
+
+tanzania_map = readRDS("data/tanzania_map.RDS")
+chart_count <<- chart_count + 1
+
+
+ggmap(tanzania_map, extent = "device") + geom_point(aes(x = longitude, y = latitude), colour = "red", 
+                                                    alpha = 0.05, size = 1, data = prediction_set_nolon) +
+labs(title = paste0('Diagram ',chart_count,' - Map Of Imputed Well GPS Coordinates'))
+```
+The map in diagram 6 shows the distribution of the imputed observations in red, and the location of all of the observations (including the imputed ones) is shown in diagram 7.
+
+```{r latlon3, echo=FALSE, message=FALSE, warning=FALSE,  comments =NA}
+chart_count <<- chart_count + 1
+ggmap(tanzania_map, extent = "device") + geom_point(aes(x = longitude, y = latitude), colour = "blue", 
+                                                    alpha = 0.05, size = 0.2, data = 
+                                                        prediction_set_working)+
+labs(title = paste0('Diagram ',chart_count,' - Map Of All Well GPS Coordinates'))
+
+rm(prediction_set_nolon, prediction_set_lon, tanzania_map)
+
+```
+
+\pagebreak
+
+###Altitude *gps_height*
+
+The Altitude variable gives the height above sea water of the well. Looking at the density plot of Altitude (diagram 8), there are a large number of points around 0. There are in total 20,438 observations with an altitude of zero in the data. This is possible but more likely to represent missing data. 
+
+```{r alt}
+chart_density(prediction_set_working, "gps_height", "Altitude")
+```
+
+To test this hypothesis, 5 random observations with zero altitude and 5 with non-zero were selected. The GPS coordinates were then looked up in an online tool (What is my elevation 2018) to retrieve the altitude. The results in table 7 show that the zero altitude data does appear to be missing as the retrieved altitudes range from 1,130 to 1,432. On the other hand the difference between the two altitudes where the original was non-zero vary from -857 to 858. Using the tool also made it clear that the altitude is measured in metres, therefore the variable was renamed "altitude_metres".
+
+\pagebreak
+
+```{r alt1}
+set.seed(80085)
+nonzero_height_sample = sample_n(
+    prediction_set_working[!prediction_set_working$gps_height == 0,c("gps_height","latitude","longitude")],5)
+
+nonzero_height_sample = nonzero_height_sample %>%
+    cbind(online_height = c(258,
+                            1030,
+                            1151,
+                            1280,
+                            1636)
+    )
+nonzero_height_sample$height_diff = nonzero_height_sample$gps_height - nonzero_height_sample$online_height
+
+zero_height_sample = sample_n(
+    prediction_set_working[prediction_set_working$gps_height == 0,c("id","gps_height","latitude","longitude")],5)
+
+zero_height_sample = zero_height_sample %>%
+    cbind(online_height = c(1130,
+                            1359,
+                            1195,
+                            1432,
+                            1166)
+    )
+
+zero_height_sample%>%
+    kable(caption = "Altitude In Data Against Online Lookup - Height Is Zero")
+nonzero_height_sample %>%
+    kable(caption = "Altitude In Data Against Online Lookup - Height Not Zero")
+
+prediction_set_working = prediction_set_working %>%
+    rename(altitude_metres = gps_height)
+```
+
+Based on these outcomes, zero altitude data was treated as missing. A new altitude was imputed using a K Nearest Neighbours regression with Latitude and Longitude as the predictors. The data where the altitude and Latitude/Longitude were present in the original set was taken to build the model. A 10% test set was created and then models were built with K values of 1 to 7. Mean Squared Error (MSE) was used to measure performance and best model used K=1 with an MSE of 733, meaning an average error of 27 metres. The performance results can be seen in table 9. 
+The model with K=1 was then used to predict the missing altitude numbers. After running the model and updating the altitude data, another sample of 5 of the predicted altitudes were compared with the online tool. The results are available in table 10 and show that there is still error in the data, but major improvement in the results.
+
+```{r alt3}
+
+
+altitude_knn_set = prediction_set_working[prediction_set_working$latitude != 0 & prediction_set_working$altitude_metres != 0,c("id","altitude_metres","longitude","latitude")]
+
+altitude_knn_set_test = sample_n(altitude_knn_set,nrow(altitude_knn_set)/10)
+altitude_knn_set_train = altitude_knn_set[!altitude_knn_set$id %in% altitude_knn_set_test$id,]
+
+set.seed(80085)
+
+
+for(i in 1:7) {
+    altitude_knn_model = knn.reg(
+        train = altitude_knn_set_train[,c("longitude","latitude")], 
+        test = altitude_knn_set_test[,c("longitude","latitude")],
+        y =altitude_knn_set_train$altitude_metres,
+        k = i
+    )
+    MSE = mean((altitude_knn_set_test$altitude_metres - altitude_knn_model$pred)^2)
+    K = altitude_knn_model$k
+    if(!exists("knn_performance")) {
+        knn_performance = 
+            data.frame(K, MSE)
+    } else {
+        knn_performance = knn_performance %>%
+            rbind(c(K, MSE))
+    }
+}
+
+best_K = knn_performance$K[knn_performance$MSE == min(knn_performance$MSE)]
+knn_performance %>%
+    kable(caption = 'Results for K from KNN for Altidue data')
+prediction_set_working_nonalti = prediction_set_working[prediction_set_working$altitude_metres == 0,]
+prediction_set_working_alti = prediction_set_working[!prediction_set_working$altitude_metres == 0,]
+
+altitude_best_knn_model = knn.reg(
+    train = prediction_set_working_alti[,c("longitude","latitude")], 
+    test = prediction_set_working_nonalti[,c("longitude","latitude")],
+    y =prediction_set_working_alti$altitude_metres,
+    k = best_K
+)
+
+
+prediction_set_working_nonalti$altitude_metres = altitude_best_knn_model$pred
+
+set.seed(80085)
+new_height_sample = sample_n(
+    prediction_set_working_nonalti[,c("altitude_metres","latitude","longitude")],5)
+
+new_height_sample = new_height_sample %>%
+    cbind(online_height = c(847,
+                            1038,
+                            1113,
+                            1169,
+                            484)
+    )
+new_height_sample$height_diff = new_height_sample$altitude_metres - new_height_sample$online_height
+prediction_set_working = rbind(prediction_set_working_nonalti, prediction_set_working_alti)
+
+new_height_sample%>%
+    kable(caption = "Altitude In Data Against Online Lookup - KNN Determined")
+
+
+rm(prediction_set_working_nonalti, prediction_set_working_alti,
+   altitude_best_knn_model,new_height_sample,
+   altitude_knn_set_test, altitude_knn_set_train, altitude_knn_set,
+   knn_performance, nonzero_height_sample, zero_height_sample,
+   best_K, i, K, MSE, altitude_knn_model)
+
+```
+
+##Well Construction
+
+###Installer *installer*
+
+The installer variable gives information about who installed the well. There is a high level of data entry discrepancy (for instance there is "Losaa-Kia water supp", "Losa-kia water suppl", "Losakia water supply"). The same data cleaning rules as for sub-village were applied, namely, lowercase conversion, removal of non-alpha characters, removal of one character sub strings, double spaces reduced to single spacing and and white space was removed.   
+
+```{r installer1}
+
+prediction_set_working$installer = char_clean(prediction_set_working, "installer")
+
+installer_count = table_char_freq(prediction_set_working, 
+                                        'installer',
+                                        c("Well Installer"))
+
+factor_summary_table(installer_count) %>%
+    kable(caption = "Well Installer - Observations By Unique Installer - Summary")
+
+```
+
+After cleaning, there are 1,857 factors in the data, most containing only a few observations. However, 30% (17,406) of the observations come from a category called "DWE" which stands for District Water Engineer. There is an additional category called RWE (Rural Water Engineer) with 1206 observations. A new variable was created called "installed_water_engineer" with a 1 for all observations where the installer was RWE or DWE and a 0 for all other observations. The installer variable was dropped.
+
+A cross tabulation of the Water Engineer variable by the well status shows very little difference between the two groups. Those not installed by a Water Engineer are very slightly more likely to have a Functional status (55.2% to 52.4%).
+
+```{r installer2}
+prediction_set_working$installer_water_engineer = 0
+prediction_set_working[prediction_set_working$installer %in% c("dwe","rwe"),"installer_water_engineer"] = 1
+
+
+table(prediction_set_working[,c("status_group","installer_water_engineer")]) %>%
+    prop.table(2) %>%
+    {. * 100} %>% 
+    round(1) %>%
+    kable(caption = "Proportion Of Well Functionality Observations by Water Engineer Installer Status")
+
+rm(installer_count)
+
+```
+
+###Funder *funder*
+
+The source of the funding for the well is captured in the variable funder. Again, there are data entry issues although not as severe (for instance there is "Losaa-kia Water Supply" "Losakia Water Supply"  ) and the data was cleaned as per the installer variable. For this variable, the largest number observations is 9,084 for "Government Of Tanzania".
+A new variable was created called "government_funded", with 1 value of 1 for all observations where "Government of Tanzania" was the observation and 0 for all other observations. A cross tabulation of this new variable shows a difference in well functionality, with 41% of Government wells being functional compared with 56.7% of the others. 
+
+```{r funder}
+prediction_set_working$funder = char_clean(prediction_set_working, "funder")
+
+funder_count = table_char_freq(prediction_set_working, 
+                                  'funder',
+                                  c("Well funder"))
+
+###GovtFunde
+prediction_set_working$government_funded  = 0
+prediction_set_working$government_funded[prediction_set_working$funder %in% c("government of tanzania")] = 1
+
+
+table(prediction_set_working[,c("status_group","government_funded")]) %>%
+    prop.table(2) %>%
+    {. * 100} %>% 
+    round(1) %>%
+    kable(caption = "Proportion Of Well Functionality Observations by Government Funded Status")
+
+```
+
+There were also 22,642 records where the funder name was the same as the installer name (not including blanks) and a variable was created to capture where the installer and funder were the same. Some additional cleaning and matching rules were applied to the data before creating the variable. 
+Firstly blank names were changed to 'unknown_funder' and 'unknown_after' to avoid false matches in the next stage, and this reduced matches to 18,119. 
+Secondly, a fuzzy matching logic was used to account for data entry errors. The method used was Optimal String Alignment distance which returns a 'string distance'. 'String distance' is the number of deletions, insertions, substitutions and character switches to make two strings match. Funder was considered to match installer When the string distance was two or less. Two was chosen as the max string distance for matching as there was a high incidence of three letter funders and installers which would produce a score of 3 even if all characters were different. After the fuzzy matching there were 21,530 matches in total.
+The new variable is called "funder_installer", with a value of 1 were there is a match and 0 otherwise. The cross tabulation does not show much difference between the two groups.
+
+The original funder variable was dropped from the data set.
+
+```{r funder_installer}
+
+prediction_set_working$installer[prediction_set_working$installer == ''] = 'unknown_installer'
+prediction_set_working$installer[prediction_set_working$funder == ''] = 'unknown_funder'
+
+funder_installer_similarity = stringdist(prediction_set_working$funder, 
+                                         prediction_set_working$installer,
+                                         method = "osa")
+
+prediction_set_working$funder_installer = 0
+
+prediction_set_working$funder_installer[funder_installer_similarity <= 2] = 1
+
+
+table(prediction_set_working[,c("status_group","funder_installer")]) %>%
+    prop.table(2) %>%
+    {. * 100} %>% 
+    round(1) %>%
+    kable(caption = 'Matched Funder and Installer Status By Observed Well Functionality (%)')
+
+prediction_set_working = drop_col(prediction_set_working, "installer")
+prediction_set_working = drop_col(prediction_set_working, "funder")
+
+rm(funder_count,funder_installer_similarity)
+
+```
+
+\pagebreak
+
+###Construction Year *construction_year*
+
+The year that the well was constructed is also in the  data with wells constructed between 1960 and 2013. More than a third of the data doesn't have any construction year.
+Diagram 11 shows that the well construction is skewed to more recent years, 17 wells observed were constructed in 1966 and 2645 were from 2010. Looking at a chart of the percentages of observations by well status, there is a clear negative linear relationship between year and non-functional wells. This indicates that it might be useful in prediction, but the data without construction year will not be able to use this. 
+
+```{r construction1, echo=FALSE,message=FALSE, warning=FALSE,  comments =NA}
+
+prediction_set_working$construction_year = as.numeric(prediction_set_working$construction_year)
+prediction_set_working$construction_year[prediction_set_working$construction_year == 0] = NA
+chart_obs(prediction_set_working,"construction_year","Construction Year")
+chart_percent(prediction_set_working,"construction_year", "Year Of Construction")
+```
+
+To amend this, the data was turned into a categorical variable, being split into decades and a 'None' category to represent missing data. This method maintains the relationship, as can be seen in diagram 12, and allows the data to be used.
+
+```{r construction2}
+prediction_set_working$construction_decade = 'None'
+prediction_set_working$construction_decade[which(!is.na(prediction_set_working$construction_year))] = 
+    paste0(substr(prediction_set_working$construction_year[which(!is.na(prediction_set_working$construction_year))],1,3),"0s")
+
+chart_percent(prediction_set_working,"construction_decade", "Decade Of Construction")
+
+prediction_set_working = drop_col(prediction_set_working, "construction_year")
+```
+
+\pagebreak
+
+###Total Static Head *amount_tsh*
+
+Total static head is "the difference in elevation between the liquid levels of the suction and discharge" (Australian Pump Technical Handbook 1987), meaning how far vertically the water has to travel from the source. This variable has a range of zero to 350,000, with more than a third of the data having zero as the value. Without knowledge of how this variable is calculated both ends of the spectrum seem unlikely, but in an attempt to not remove data that may have value it was retained. However, an additional categorical variable was also created which coded all the 0 values together and then discretised the remaining data into three groups of equal number of observations. This variable is called "total_static_head_grp".
+
+There does appear to be some differences which can be seen in the chart of this new variable, the zero value data has a much higher total static head than the other variables.
+
+```{r tsh}
+
+prediction_set_working$total_static_head_grp = NA
+prediction_set_working$total_static_head_grp[prediction_set_working$amount_tsh == 0]  = 'Zero'
+
+prediction_set_working$total_static_head_grp[prediction_set_working$amount_tsh != 0] = 
+    bin(prediction_set_working$amount_tsh[prediction_set_working$amount_tsh != 0],
+        5,
+        method="content") %>%
+    as.character()
+
+prediction_set_working$total_static_head_grp  = prediction_set_working$total_static_head_grp %>%
+    as.factor()
+levels(prediction_set_working$total_static_head_grp) = c('1-30', '100-500', '30-100', '1000+', '500-1000', 'Zero')
+
+prediction_set_working$total_static_head_grp = prediction_set_working$total_static_head_grp %>%
+    as.character() %>%
+    factor(c('Zero', '1-30', '30-100', '100-500', '500-1000', '1000+'))
+
+chart_percent(prediction_set_working,"total_static_head_grp", "Total Static Head Group")
+```
+
+\pagebreak
+
+##Water Source and Quality
+
+###Water Basin
+
+The data in basin is clean and complete. There are 9 basins listed with a relatively even spread of observations across them. Lake Victoria is the basin with the most observations with 10,248 observations and Lake Rukwa has the least with 2454. The well status percentage chart by basin shows a lot of variation by basin with only 37.2% of 'Ruvuma / Southern Coast' basin wells being functional compared with 65.4% functionality for the 'Lake Nyasa' basin.
+
+```{r basin}
+table_char_freq(prediction_set_working,"basin", "Water Basin") %>%
+    kable(caption = "Observations By Water Basin")
+chart_percent(prediction_set_working,"basin", "Water Basin") + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+\pagebreak
+
+###Source Of Water *source, source_type and source_class*
+
+There are three variables that describe the source of the water. Source, source type and source class. They all contain clean data. Source is a little more detailed than source type, with boreholes split by whether they were dug with a machine or by hand, and rivers and lakes are combined in source type. Looking at a chart of source by percentage of status group, it is clear that there are differences between these split variables with Lake sourced wells especially having a much higher proportion of non-functional wells. Therefore the Source type variable was dropped.
+```{r source1}
+chart_percent(prediction_set_working,"source", "Water Source Type")+ theme(axis.text.x = element_text(angle = 90, hjust = 1))
+prediction_set_working = drop_col(prediction_set_working, "source_type")
+```
+
+The last source variable is an aggregation that describes if the source is from groundwater, surface or unknown.
+
+```{r source2}
+chart_percent(prediction_set_working,"source_class", "Water Source Class")
+
+```
+
+\pagebreak
+
+###Quantity Of Water *quantity and quantity group*
+
+The water quantity is described with categorical variables: dry; enough; insufficient; seasonal; or unknown. This data is duplicated across two variables quantity and quantity_group. As there is no difference, quantity_group was dropped.
+
+A chart of the percentages of status group for each factor shows a lot of variation in well functionality, wells that have a quantity of "dry" are almost all non-functional.
+
+```{r quantity}
+prediction_set_working = drop_col(prediction_set_working, "quantity_group")
+chart_percent(prediction_set_working,"quantity", "Water Quantity Type")
+
+```
+
+\pagebreak
+
+###Quality Of Water *water_quality and quality_group*
+
+In the variable quality_group quality is described with categorical variables: colored; fluoride; good; milky; salty or unknown. The variable water_quality splits fluoride into fluoride and fluoride abandoned and does the same with salty, adding a salty abandoned category. Water_quality was dropped and a new variable called, quality_abandoned was created with a value of 1 for either salty_abandoned or fluoride_abandoned and 0 for all other categories.
+
+Plots show that both variables have value in describing well functionality.
+
+```{r quality}
+prediction_set_working$abandoned_quality = 'other'
+prediction_set_working$abandoned_quality[grep("abandoned", prediction_set_working$water_quality)] = 'abandoned'
+
+prediction_set_working = drop_col(prediction_set_working, "water_quality")
+
+chart_percent(prediction_set_working,"quality_group", "Water Quality Type")
+chart_percent(prediction_set_working,"abandoned_quality", "Abandoned Water Quality")
+
+```
+
+\pagebreak
+
+##Well Type
+
+###Extraction Method *extraction_type, extraction_type_group and extraction_type_class*
+
+The extraction method describes how the water is drawn from the well. There are three variables that are available and from most to least detail they are extraction_type, extraction_type_group and extraction_type_class. 
+Extraction_type_class describes the broad extraction methods as: gravity, handpump, motorpump, rope pump, submersible, wind-powered and other.
+Extra detail is provided in extraction_type_group over extraction_type_class, in the handpump category which has five factors related to brands and the in submersible category, which has two factors related to brands. In diagram 19 there is visible variation in the percentage of non functional wells across the different handpumps and motorpumps,  therefore extraction_type_class was removed in favor of the more explanatory extraction_type_group.
+Extraction_type has only a few additional brand categories, each with only small numbers of observations. So for this reason it was also removed in favor of extraction_type_group.
+
+```{r extraction}
+
+chart_count = chart_count + 1
+chart_data = ggplot(prediction_set_working[
+    prediction_set_working$extraction_type_class %in% c("handpump","motorpump"),])
+
+    title_name = paste0('Diagram ',chart_count,' - Observed Extraction Subtype By Well Status (%)')
+    y_name = paste0('Percentage Of Extraction Subtype Group')
+    
+chart_data+
+    geom_bar(aes(x = extraction_type_group, y= id, fill = status_group),position = "fill", stat = "identity") +
+    labs(x = "Extraction Subtype (Handpump and Submersible)" , title = title_name, y = y_name) +
+    scale_y_continuous() +
+    facet_grid(~extraction_type_class, 
+               scales = "free_x")+ 
+    scale_fill_manual(values = c("firebrick","orangered","forestgreen")) +
+    theme_bw() +
+    theme(panel.border = element_rect(fill = NA, colour = NA), 
+      axis.line = element_line(colour = 'grey13'), 
+      panel.grid.major = element_line(colour = NA), 
+      panel.grid.minor = element_line(colour = NA),
+      axis.text.x = element_text(angle = 45, hjust = 1))
+ 
+prediction_set_working = drop_col(prediction_set_working, "extraction_type_class")
+prediction_set_working = drop_col(prediction_set_working, "extraction_type")
+rm(chart_data)
+```
+
+###Type Of Well *waterpoint_type and waterpoint_type_group*
+
+How the well is set up is described in two variables, waterpoint_type and waterpoint_type_group. The only difference in these variables is that in waterpoint_type the communal standpipe category is split into communal standpipe and communal standpipe multiple. Both have a high number of observations, so the waterpoint_type_group variable was dropped. The categories in the remaining waterpoint_type variable are: communal standpipe; communal standpipe multiple; cattle trough; hand pump; improved spring; dam; or other.
+
+```{r welltype}
+prediction_set_working = drop_col(prediction_set_working, "waterpoint_type_group")
+chart_percent(prediction_set_working,"waterpoint_type", "Type Of Well")+ theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+##Well Scheme *scheme_name* and Scheme Management *well_scheme_management*
+
+There are two variables related to the scheme that the well is built under. Well scheme names the scheme while well_scheme_management tells who the scheme owner is.
+
+There are 13 categories of scheme management, including blank, 'None' and 'Other'. 
+A new variable was created to grouping scheme management into "Other", "Government", "Private" and "Community". Table 16 below shows how the variable was transformed, and the new variable was called "scheme_management_broad".'None', 'Other' and blank variables were combined into the value called 'Other'.
+
+```{r wellscheme1}
+
+prediction_set_working$scheme_management[prediction_set_working$scheme_management %in% c('None','')] = 'Other'
+
+scheme_managment_broad = rbind(
+    c('Other','Other'),
+    c('Company','Private'),
+    c('Private operator','Private'),
+    c('Trust','Community'),
+    c('SWC','Community'),
+    c('VWC','Community'),
+    c('WUA','Community'),
+    c('WUG','Community'),
+    c('Parastatal','Government'),
+    c('Water authority','Government'),
+    c('Water Board','Government')) %>%
+    as.data.frame() %>%
+    setNames(c("scheme_management","scheme_management_broad"))
+
+scheme_managment_broad %>%
+    kable(caption = 'Mapping Between Scheme Management and Grouped SCheme Management')
+```
+
+After cleaning, the scheme name has 2,468 categories. The largest category has 669 observations and most have very few observations, this variable was removed.
+
+```{r wellscheme2}
+prediction_set_working = merge(prediction_set_working,
+                               scheme_managment_broad,
+                               by = "scheme_management",
+                               all.x = TRUE)
+
+prediction_set_working$scheme_management_broad = prediction_set_working$scheme_management_broad %>%
+    as.factor()
+
+chart_percent(prediction_set_working,"scheme_management_broad", 'Scheme Management')
+
+#Name
+
+prediction_set_working$scheme_name = char_clean(prediction_set_working, "scheme_name")
+
+scheme_count = table_char_freq(prediction_set_working, 
+                                  'scheme_name',
+                                  c("Well Installer"))
+
+prediction_set_working = drop_col(prediction_set_working, "scheme_name")
+
+rm(scheme_count, scheme_managment_broad)
+
+```
+
+\pagebreak
+
+##Well Operations
+
+###Well Management *well_management*
+
+There is a variable related to the ongoing management of the well, it supplies five categories of well management: commercial; parastatal; user-group; unknown; or other. Wells with unknown management have the worst performance with 55% of them being non-functional.
+
+```{r well_management}
+chart_percent(prediction_set_working,"management_group", "Well Management")
+
+```
+
+\pagebreak
+
+###Well Payment *payment and payment_type*
+
+The way that users pay for the well is recorded as: never pay; pay annually; pay monthly; pay per bucket; pay when scheme fails; unknown; and other. This variable is called payment.
+There is another variable that has the exact same data with slightly different category names called payment_type, this variable was dropped.
+```{r payment}
+prediction_set_working = drop_col(prediction_set_working, "payment_type")
+chart_percent(prediction_set_working,"payment","Well Payment Type")+ theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+\pagebreak
+
+###Permits *permit*
+
+A binary variable indicates whether or not the well has a permit to operate. The 3056 observations where this was not recorded were cleaned to be classified as 'unknown', making the variable categorical.
+```{r permit}
+prediction_set_working$permit = prediction_set_working$permit %>%
+    as.character()
+prediction_set_working$permit[prediction_set_working$permit == ''] = 'unknown'
+prediction_set_working$permit = prediction_set_working$permit %>%
+    as.factor()
+chart_percent(prediction_set_working,"permit", "Well Permit")
+```
+
+\pagebreak
+
+##Well Community
+
+###Public Meeting *public_meeting*
+
+There is no details about the public_meeting variable. The assumption made is that it is TRUE when the well is in a public meeting place. Another option is that the well was approved at a public meeting. The variable is binary with 3334 blank variables, these are classified as 'unknown' again turning the binary variable into a categorical.
+
+```{r meeting}
+prediction_set_working$public_meeting = prediction_set_working$public_meeting %>%
+    as.character()
+prediction_set_working$public_meeting[prediction_set_working$public_meeting == ''] = 'unknown'
+prediction_set_working$public_meeting = prediction_set_working$public_meeting %>%
+    as.factor()
+chart_percent(prediction_set_working,"public_meeting", "Public Meeting Place")
+```
+
+###Population *population*
+
+Population describes the number of people serviced by the well. There is a value of zero for almost one third of the observations which implies missing data. Therefore, a new variable with the existing data binned into five equal groups was created. The zero value data was labelled "unknown". The bins for the data are: 0-18; 18-100; 100-203; 203-400; 400+.
+
+```{r population2}
+prediction_set_working$population[prediction_set_working$population == 0]  = NA
+prediction_set_working$population_bins = 'unknown'
+prediction_set_working$population_bins[which(!is.na(prediction_set_working$population))] = 
+    bin(prediction_set_working$population[which(!is.na(prediction_set_working$population))],
+    5,
+    method="content") %>%
+    as.character()
+
+prediction_set_working$population_bins  = prediction_set_working$population_bins %>%
+    as.factor()
+levels(prediction_set_working$population_bins) = c('0-18', '100-203', '18-100', '203-400', '400+', 'unknown')
+
+prediction_set_working$population_bins = prediction_set_working$population_bins %>%
+    as.character() %>%
+    factor(c('0-18', '18-100', '100-203', '203-400', '400+', 'unknown'))
+
+chart_percent(prediction_set_working,"population_bins", "Population")
+
+```
+
+##Other Data *num_private, recorded_by, wpt_name*
+
+There were three other variables that were dropped. Num_private has no information on what the variable is; recorded_by has the same category "GeoData Consultants Ltd" for all responses; and wpt_name is the name of the specific water point name.
+
+```{r other}
+prediction_set_working = drop_col(prediction_set_working, "num_private")
+prediction_set_working = drop_col(prediction_set_working, "wpt_name")
+prediction_set_working = drop_col(prediction_set_working, "recorded_by")
+
+saveRDS(prediction_set_working, "../Part 2/data/prediction_set_final.RDS")
+
+```
+
+\pagebreak
+
+## References
+
+Australian Pump Technical Handbook (1987) *Pump Technical Terminology*, Accessed 08 September 2018, available:
+http://www.pumpapplicationengineers.com.au/files/pump-technical-terminology.pdf
+
+DrivenData (2018) *Competition: Pump It Up: Data Mining The Water Table*, Accessed 08 September 2018, available:
+https://www.drivendata.org/competitions/7/pump-it-up-data-mining-the-water-table/
+
+International Household Survey Network (2014) *Tanzania - Population and Housing Census*, Accessed 08 September 2018, available:
+http://catalog.ihsn.org/index.php/catalog/4618/download/58601
+
+Japan International Cooperation Agency (2008) *Tanzania: So Much Water. So What’s the Problem?*, Accessed 08 September 2018, available:
+https://www.jica.go.jp/english/news/focus_on/water/water_6.html
+
+Wikipedia (2013) *Majengo - Wikipedia*, Accessed 08 September 2018, available:
+https://en.wikipedia.org/wiki/Majengo
+
+What is my elevation? (2018) *What is my elevation?*, Accessed 08 September 2018, available:
+https://www.whatismyelevation.com/##
