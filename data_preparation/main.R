@@ -1,3 +1,5 @@
+##### 
+#Libraries
 library(tidyverse)
 library(ggplot2)
 library(lubridate)
@@ -5,7 +7,12 @@ library(ggmap)
 library(FNN)
 library(stringdist)
 library(OneR)
+library(mlr)
+library(clue)
+library(plotly)
 
+#####
+#Setup
 source("data_preparation/functions.R")
 chart_count = 0
 #Read in the data
@@ -27,14 +34,17 @@ prediction_set_working = prediction_set
 #Clean up unneeded data
 rm(predictors, response)
 
-#####Variable checking
+#####
+#Response Variable
 
 #Status Group
 table(prediction_set$status_group) %>%
     cbind("Observations:" = .)
 
 
-#----------------Date_recorded, create year/month/weekday
+#####
+#Dates
+#Date_recorded, create year/month/weekday
 
 month = c('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec')
 weekday = c('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday',  'Saturday', 'Sunday')
@@ -51,10 +61,12 @@ rm(month, weekday)
 chart_statusfill_obs(prediction_set_working, "weekday_recorded", "Weekday")
 
 
-##----------------Geographic
+#####
+#----------------Geographic
 
 
-#------------Region
+#####
+#Region
 prediction_set_working = drop_col(prediction_set_working,'region_code')
 
 table_char_freq(prediction_set_working, 
@@ -63,7 +75,8 @@ table_char_freq(prediction_set_working,
     t()
 
 
-#------------District and LGA
+#####
+#District and LGA
 
 prediction_set_working$district_region = as.factor(paste0(prediction_set_working$region,"_D",prediction_set_working$district_code))
 
@@ -106,7 +119,8 @@ rm(lga_count,
 prediction_set_working = drop_col(prediction_set_working,'district_region')
 prediction_set_working = drop_col(prediction_set_working,'district_code')
 
-#------------Ward
+#####
+#Ward
 prediction_set_working$ward_lga = paste0(prediction_set_working$ward,"_",prediction_set_working$lga)
 
 ward_lga_count = table_char_freq(prediction_set_working, 
@@ -123,7 +137,8 @@ rm(ward_lga_count)
 
 #--------IT WOULD BE INTERESTING TO SEE FUNCTIONALITY BY WARD SIZE
 
-#--------------Subvillage
+#####
+#Subvillage
 
 prediction_set_working$subvillage = tolower(prediction_set_working$subvillage)
 prediction_set_working$subvillage = gsub("[^[:alpha:] ]","",prediction_set_working$subvillage)
@@ -150,13 +165,14 @@ chart_obs_agg(subvillage_ward_lga_count, "observations_ceiling1", "Subvillage-Wa
 
 rm(subvillage_ward_lga_count)
 
-#------------Admin_Region
+#####
+#Admin_Region
 
 prediction_set_working$admin_district = paste0(prediction_set_working$region,"_",prediction_set_working$lga,"_OTHER")
 
 little_lgas = table(prediction_set_working$lga) %>%
     as.data.frame() %>%
-    filter(Freq < 100) %>%
+    filter(Freq < 50) %>%
     .$Var1 
 little_lga_rows = prediction_set_working$lga %in% little_lgas
 prediction_set_working$admin_district[little_lga_rows] = 
@@ -164,7 +180,7 @@ prediction_set_working$admin_district[little_lga_rows] =
 
 big_wards = table(prediction_set_working$ward_lga) %>%
     as.data.frame() %>%
-    filter(Freq >= 100) %>%
+    filter(Freq >= 50) %>%
     .$Var1 
 big_ward_rows = prediction_set_working$ward_lga %in% big_wards
 prediction_set_working$admin_district[big_ward_rows] = 
@@ -179,13 +195,14 @@ admin_district_count = table_char_freq(prediction_set_working,
 factor_summary_table(admin_district_count)
 
 admin_district_count$observations_ceiling10 = 
-    data_buckets(admin_district_count, "Observations", 100) 
+    data_buckets(admin_district_count, "Observations", 50) 
 
 chart_obs_agg(admin_district_count, "observations_ceiling10", "Admin District")
 
 rm(admin_district_count, big_ward_rows, big_wards, little_lga_rows, little_lgas)
 
-##Weight of Information transformation 
+#####
+#Weight of Information transformation for admin_district 
 
 admin_district_status = 
     as.data.frame.matrix(
@@ -235,9 +252,38 @@ prediction_set_working = merge(prediction_set_working,
       by = "admin_district",
       all.x = TRUE)
 
-####-----------GPS Data
+#####
+#GPS Data
 
-#---------------Longitude/Latitude
+#####
+#Height/Alt Clustering
+
+prediction_set_working = prediction_set_working %>%
+    rename(altitude_metres = gps_height)
+
+prediction_set_complete = prediction_set_working[
+    !prediction_set_working$longitude == 0 &
+        !prediction_set_working$altitude_metres == 0,]
+
+geo_data = prediction_set_complete[,c("longitude",
+                           "latitude",
+                           "altitude_metres")]
+geoTask = makeClusterTask(data = prediction_set_complete[,c("longitude",
+                                                  "latitude",
+                                                  "altitude_metres")])
+geoLearner = makeLearner("cluster.kmeans",
+            centers  = 14)
+
+geoCluster = train(task = geoTask, learner = geoLearner)
+
+pred = predict(geoCluster, newdata = geo_data)
+table(pred$data$response)
+
+
+rm(prediction_set_complete, geo_data, geo_cluster)
+
+#####
+#Longitude/Latitude
 
 chart_density(prediction_set_working, "longitude", "Longitude")
 
@@ -284,6 +330,7 @@ prediction_set_working = prediction_set_nolon %>%
     rbind(prediction_set_lon)
 
 tanzania_map = get_map(location = "tanzania", maptype = "roadmap",zoom = 6)
+map = get_map()
 
 ggmap(tanzania_map, extent = "device") + geom_point(aes(x = longitude, y = latitude), colour = "red", 
                                                     alpha = 0.05, size = 1, data = prediction_set_nolon)
@@ -292,15 +339,16 @@ ggmap(tanzania_map, extent = "device") + geom_point(aes(x = longitude, y = latit
 
 rm(prediction_set_nolon, prediction_set_lon, tanzania_map)
 
-#---------------Altitude
+#####
+#Altitude
 
-chart_density(prediction_set_working, "gps_height")
+chart_density(prediction_set_working, "altitude_metres")
 
 ## AltitudeLookupExperiment
 
 set.seed(80085)
 nonzero_height_sample = sample_n(
-    prediction_set_working[!prediction_set_working$gps_height == 0,c("gps_height","latitude","longitude")],5)
+    prediction_set_working[!prediction_set_working$altitude_metres == 0,c("altitude_metres","latitude","longitude")],5)
 
 nonzero_height_sample = nonzero_height_sample %>%
     cbind(online_height = c(2213,
@@ -309,10 +357,10 @@ nonzero_height_sample = nonzero_height_sample %>%
                             1436,
                             224)
     )
-nonzero_height_sample$height_diff = nonzero_height_sample$gps_height - nonzero_height_sample$online_height
+nonzero_height_sample$height_diff = nonzero_height_sample$altitude_metres - nonzero_height_sample$online_height
 
 zero_height_sample = sample_n(
-    prediction_set_working[prediction_set_working$gps_height == 0,c("id","gps_height","latitude","longitude")],5)
+    prediction_set_working[prediction_set_working$altitude_metres == 0,c("id","altitude_metres","latitude","longitude")],5)
 
 zero_height_sample = zero_height_sample %>%
     cbind(online_height = c(927,
@@ -325,10 +373,10 @@ zero_height_sample = zero_height_sample %>%
 zero_height_sample
 nonzero_height_sample
 
-prediction_set_working = prediction_set_working %>%
-    rename(altitude_metres = gps_height)
 
-## AltitudeKNN
+
+#####
+#AltitudeKNN
 
 #Get data where latitude is not 0 and altitude is 0, for the KNN
 altitude_knn_set = prediction_set_working[prediction_set_working$latitude != 0 & prediction_set_working$altitude_metres != 0,c("id","altitude_metres","longitude","latitude")]
@@ -393,7 +441,23 @@ rm(prediction_set_working_nonalti, prediction_set_working_alti,
    knn_performance, nonzero_height_sample, zero_height_sample,
    best_K, i, K, MSE, altitude_knn_model)
 
-####-----------Well Construction
+
+#####
+#Add clusters
+
+geo_data = prediction_set_working[,c("longitude",
+                                      "latitude",
+                                      "altitude_metres")]
+
+cluster_pred = predict(geoCluster, newdata = geo_data)
+table(cluster_pred$data$response)
+
+prediction_set_working$geo_cluster = cluster_pred$data$response
+
+##NEED TO MAP THIS DATA AT SOME POINT###
+
+#####
+#Well Construction
 
 #---------------Installer
 
