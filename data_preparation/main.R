@@ -7,7 +7,7 @@ library(stringdist)
 library(OneR)
 
 source("data_preparation/functions.R")
-
+chart_count = 0
 #Read in the data
 predictors = 
     read.csv("data/4910797b-ee55-40a7-8668-10efd5c1b960.csv") %>% as.tibble()
@@ -109,8 +109,6 @@ prediction_set_working = drop_col(prediction_set_working,'district_code')
 #------------Ward
 prediction_set_working$ward_lga = paste0(prediction_set_working$ward,"_",prediction_set_working$lga)
 
-prediction_set_working = drop_col(prediction_set_working, "ward")
-
 ward_lga_count = table_char_freq(prediction_set_working, 
                              'ward_lga',
                              c("Ward Lga"))
@@ -123,25 +121,56 @@ chart_obs_agg(ward_lga_count, "observations_ceiling10", "Ward-LGA")
 
 rm(ward_lga_count)
 
+#--------IT WOULD BE INTERESTING TO SEE FUNCTIONALITY BY WARD SIZE
+
+#--------------Subvillage
+
+prediction_set_working$subvillage = tolower(prediction_set_working$subvillage)
+prediction_set_working$subvillage = gsub("[^[:alpha:] ]","",prediction_set_working$subvillage)
+prediction_set_working$subvillage = gsub('\\b\\w{1}\\b','',prediction_set_working$subvillage)
+prediction_set_working$subvillage = gsub("  "," ",prediction_set_working$subvillage)
+prediction_set_working$subvillage = trimws(prediction_set_working$subvillage)
+
+prediction_set_working$subvillage[prediction_set_working$subvillage == ''] = NA
+
+prediction_set_working$subvillage_ward_lga = paste0(prediction_set_working$subvillage, "_", prediction_set_working$ward_lga)
+
+prediction_set_working$subvillage_ward_lga[is.na(prediction_set_working$subvillage)] = NA
+
+subvillage_ward_lga_count = table_char_freq(prediction_set_working, 
+                                       'subvillage_ward_lga',
+                                       c("Admin District"))
+
+factor_summary_table(subvillage_ward_lga_count)
+
+subvillage_ward_lga_count$observations_ceiling1 = 
+    data_buckets(subvillage_ward_lga_count, "Observations", 1) 
+
+chart_obs_agg(subvillage_ward_lga_count, "observations_ceiling1", "Subvillage-Ward")
+
+rm(subvillage_ward_lga_count)
+
 #------------Admin_Region
 
-big_wards = table(prediction_set_working$ward_lga) %>%
-    as.data.frame() %>%
-    filter(Freq >= 150) %>%
-    .$Var1 
-big_ward_rows = prediction_set_working$ward_lga %in% big_wards
-
+prediction_set_working$admin_district = paste0(prediction_set_working$region,"_",prediction_set_working$lga,"_OTHER")
 
 little_lgas = table(prediction_set_working$lga) %>%
     as.data.frame() %>%
-    filter(Freq < 150) %>%
+    filter(Freq < 100) %>%
     .$Var1 
 little_lga_rows = prediction_set_working$lga %in% little_lgas
+prediction_set_working$admin_district[little_lga_rows] = 
+    paste0(prediction_set_working$region[little_lga_rows],"_OTHER_OTHER")
 
-
-prediction_set_working$admin_district = paste0(prediction_set_working$region,"_",prediction_set_working$lga,"_OTHER")
-prediction_set_working$admin_district[big_ward_rows] = paste0(prediction_set_working$region[big_ward_rows],"_",prediction_set_working$lga[big_ward_rows],"_",prediction_set_working$ward[big_ward_rows])
-prediction_set_working$admin_district[little_lga_rows] = paste0(prediction_set_working$region[little_lga_rows],"_OTHER_OTHER")
+big_wards = table(prediction_set_working$ward_lga) %>%
+    as.data.frame() %>%
+    filter(Freq >= 100) %>%
+    .$Var1 
+big_ward_rows = prediction_set_working$ward_lga %in% big_wards
+prediction_set_working$admin_district[big_ward_rows] = 
+    paste0(prediction_set_working$region[big_ward_rows],"_",
+           prediction_set_working$lga[big_ward_rows],"_",
+           prediction_set_working$ward[big_ward_rows])
 
 admin_district_count = table_char_freq(prediction_set_working, 
                                        'admin_district',
@@ -156,36 +185,55 @@ chart_obs_agg(admin_district_count, "observations_ceiling10", "Admin District")
 
 rm(admin_district_count, big_ward_rows, big_wards, little_lga_rows, little_lgas)
 
-#--------IT WOULD BE INTERESTING TO SEE FUNCTIONALITY BY WARD SIZE
+##Weight of Information transformation 
 
-#--------------Subvillage
+admin_district_status = 
+    as.data.frame.matrix(
+        table(prediction_set_working$admin_district,prediction_set_working$status_group)
+    )
 
-prediction_set_working$subvillage = tolower(prediction_set_working$subvillage)
-prediction_set_working$subvillage = gsub("[^[:alpha:] ]","",prediction_set_working$subvillage)
-prediction_set_working$subvillage = gsub('\\b\\w{1}\\b','',prediction_set_working$subvillage)
-prediction_set_working$subvillage = gsub("  "," ",prediction_set_working$subvillage)
-prediction_set_working$subvillage = trimws(prediction_set_working$subvillage)
+admin_district_status = admin_district_status %>%
+    setNames(c("functional","functional_repair","non_functional"))
+functional_count = sum(admin_district_status$functional)
+nonfunctional_count = sum(admin_district_status$non_functional)
+repairfunctional_count = sum(admin_district_status$functional_repair)
 
-prediction_set_working$subvillage[prediction_set_working$subvillage == ''] = NA
+admin_district_status$woe_region_functional = log(
+    ( (admin_district_status$functional + 0.0001) / functional_count ) /
+    (
+        (admin_district_status$functional_repair + admin_district_status$non_functional + 0.0001 ) / 
+        (nonfunctional_count + repairfunctional_count)
+    ) 
+    ) %>%
+    round(5)
+    
+     
+admin_district_status$woe_region_repair = log (
+    
+    ( (admin_district_status$functional_repair + 0.0001) /  repairfunctional_count) /
+        (
+            (admin_district_status$functional + admin_district_status$non_functional + 0.0001 ) / 
+                (nonfunctional_count + functional_count)
+        )
+)    %>%
+    round(5)
 
-prediction_set_working$subvillage_ward = paste0(prediction_set_working$subvillage, "_", prediction_set_working$ward_lga)
+admin_district_status$woe_region_nonfunctional = log (
+    
+    ( (admin_district_status$non_functional + 0.0001) / nonfunctional_count ) /
+        (
+            (admin_district_status$functional + admin_district_status$functional_repair + 0.0001 ) / 
+                (repairfunctional_count + functional_count)
+        )
+)    %>%
+    round(5)
 
-prediction_set_working$subvillage_ward[is.na(prediction_set_working$subvillage)] = NA
+admin_district_status$admin_district = row.names(admin_district_status)
 
-subvillage_ward_count = table_char_freq(prediction_set_working, 
-                                       'subvillage_ward',
-                                       c("Admin District"))
-
-factor_summary_table(subvillage_ward_count)
-
-subvillage_ward_count$observations_ceiling1 = 
-    data_buckets(subvillage_ward_count, "Observations", 1) 
-
-chart_obs_agg(subvillage_ward_count, "observations_ceiling1", "Subvillage-Ward")
-
-prediction_set_working = drop_col(prediction_set_working, "subvillage")
-
-rm(subvillage_ward_count)
+prediction_set_working = merge(prediction_set_working,
+      admin_district_status[,c("admin_district","woe_region_functional","woe_region_repair","woe_region_nonfunctional")],
+      by = "admin_district",
+      all.x = TRUE)
 
 ####-----------GPS Data
 
@@ -193,48 +241,50 @@ rm(subvillage_ward_count)
 
 chart_density(prediction_set_working, "longitude", "Longitude")
 
+#Separate missing and non-missing lat lon records 
 prediction_set_nolon = prediction_set_working[prediction_set_working$longitude == 0,]
 prediction_set_lon = prediction_set_working[!prediction_set_working$longitude == 0,]
 
+#Create new lat/lon variables to capture the best lat lon estimates
 prediction_set_nolon$latitude_best = NA %>%
     as.numeric()
 prediction_set_nolon$longitude_best = NA %>%
     as.numeric()
 
-prediction_set_nolon = find_new_latlon(prediction_set_nolon, prediction_set_lon, "subvillage_ward")
+#Set missing latlon to  the mean latlon of the subvillage, if available
+prediction_set_nolon = find_new_latlon(prediction_set_nolon, prediction_set_lon, "subvillage_ward_lga")
 sum(!is.na(prediction_set_nolon$longitude_new)) - sum(!is.na(prediction_set_nolon$longitude_best))
 new_latlon()
 prediction_set_nolon = drop_col(prediction_set_nolon, "longitude_new")
 prediction_set_nolon = drop_col(prediction_set_nolon, "latitude_new")
-
+#Update still missing to the mean latlon of the ward, if available
 prediction_set_nolon = find_new_latlon(prediction_set_nolon, prediction_set_lon, "ward_lga")
 sum(!is.na(prediction_set_nolon$longitude_new)) - sum(!is.na(prediction_set_nolon$longitude_best))
 new_latlon()
 prediction_set_nolon = drop_col(prediction_set_nolon, "longitude_new")
 prediction_set_nolon = drop_col(prediction_set_nolon, "latitude_new")
-
+#Update still missing latlon to the mean latlon of the lga, if available
 prediction_set_nolon = find_new_latlon(prediction_set_nolon, prediction_set_lon, "lga")
 sum(!is.na(prediction_set_nolon$longitude_new)) - sum(!is.na(prediction_set_nolon$longitude_best))
 new_latlon()
 prediction_set_nolon = drop_col(prediction_set_nolon, "longitude_new")
 prediction_set_nolon = drop_col(prediction_set_nolon, "latitude_new")
-
-
+#Update still missing latlon to the mean latlon of the region
 prediction_set_nolon = find_new_latlon(prediction_set_nolon, prediction_set_lon, "region")
 sum(!is.na(prediction_set_nolon$longitude_new)) - sum(!is.na(prediction_set_nolon$longitude_best))
 new_latlon()
 prediction_set_nolon = drop_col(prediction_set_nolon, "longitude_new")
 prediction_set_nolon = drop_col(prediction_set_nolon, "latitude_new")
-
+#Replace lat lon with the best ones found in this process
 prediction_set_nolon$latitude = prediction_set_nolon$latitude_best
 prediction_set_nolon$longitude = prediction_set_nolon$longitude_best
-
+#Drop new "best" lat lon cols
 prediction_set_working = prediction_set_nolon %>%
     select(-contains("best")) %>%
     rbind(prediction_set_lon)
 
 tanzania_map = get_map(location = "tanzania", maptype = "roadmap",zoom = 6)
-?get_map()
+
 ggmap(tanzania_map, extent = "device") + geom_point(aes(x = longitude, y = latitude), colour = "red", 
                                                     alpha = 0.05, size = 1, data = prediction_set_nolon)
 ggmap(tanzania_map, extent = "device") + geom_point(aes(x = longitude, y = latitude), colour = "blue", 
@@ -280,9 +330,10 @@ prediction_set_working = prediction_set_working %>%
 
 ## AltitudeKNN
 
-
+#Get data where latitude is not 0 and altitude is 0, for the KNN
 altitude_knn_set = prediction_set_working[prediction_set_working$latitude != 0 & prediction_set_working$altitude_metres != 0,c("id","altitude_metres","longitude","latitude")]
 
+#Test and train set for KNN
 altitude_knn_set_test = sample_n(altitude_knn_set,nrow(altitude_knn_set)/10)
 altitude_knn_set_train = altitude_knn_set[!altitude_knn_set$id %in% altitude_knn_set_test$id,]
 
@@ -418,6 +469,8 @@ chart_percent(prediction_set_working,"construction_year")
 prediction_set_working$construction_decade = 'None'
 prediction_set_working$construction_decade[which(!is.na(prediction_set_working$construction_year))] = 
     paste0(substr(prediction_set_working$construction_year[which(!is.na(prediction_set_working$construction_year))],1,3),"0s")
+prediction_set_working$construction_decade = as.factor(prediction_set_working$construction_decade)
+
 
 chart_percent(prediction_set_working,"construction_decade")
 
@@ -464,6 +517,7 @@ chart_percent(prediction_set_working,"quantity")
 
 prediction_set_working$abandoned_quality = 'other'
 prediction_set_working$abandoned_quality[grep("abandoned", prediction_set_working$water_quality)] = 'abandoned'
+prediction_set_working$abandoned_quality = as.factor(prediction_set_working$abandoned_quality)
 
 prediction_set_working = drop_col(prediction_set_working, "water_quality")
 
@@ -586,3 +640,15 @@ chart_percent(prediction_set_working,"population_bins")
 prediction_set_working = drop_col(prediction_set_working, "num_private")
 prediction_set_working = drop_col(prediction_set_working, "wpt_name")
 prediction_set_working = drop_col(prediction_set_working, "recorded_by")
+prediction_set_working = drop_col(prediction_set_working, "subvillage_ward_lga")
+prediction_set_working = drop_col(prediction_set_working, "date_recorded")
+prediction_set_working = drop_col(prediction_set_working, "subvillage")
+prediction_set_working = drop_col(prediction_set_working, "ward")
+prediction_set_working = drop_col(prediction_set_working, "ward_lga")
+prediction_set_working = drop_col(prediction_set_working, "lga")
+prediction_set_working = drop_col(prediction_set_working, "date_recorded_POSIX")
+prediction_set_working = drop_col(prediction_set_working, "month_recorded")
+prediction_set_working = drop_col(prediction_set_working, "year_recorded")
+prediction_set_working = drop_col(prediction_set_working, "admin_district")
+
+saveRDS(prediction_set_working, 'data_preparation/prediction_set.RDS')
